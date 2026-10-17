@@ -33,10 +33,10 @@ RUN git clone --recurse-submodules https://github.com/FreeCAD/FreeCAD.git
 
 WORKDIR FreeCAD
 
-RUN git checkout 1.0.0 -f && apt-get update && apt install -y cmake cmake-gui \ 
-    libboost-date-time-dev libboost-dev libboost-filesystem-dev \ 
+RUN git checkout 1.0.0 -f && apt-get update && apt install -y cmake cmake-gui \
+    libboost-date-time-dev libboost-dev libboost-filesystem-dev \
     libboost-graph-dev libboost-iostreams-dev libboost-program-options-dev \
-    libboost-python-dev libboost-regex-dev libboost-serialization-dev \ 
+    libboost-python-dev libboost-regex-dev libboost-serialization-dev \
     libboost-thread-dev libcoin-dev libeigen3-dev libgts-bin libgts-dev \
     libkdtree++-dev libmedc-dev libocct-data-exchange-dev libocct-ocaf-dev \
     libocct-visualization-dev libopencv-dev libproj-dev libpyside2-dev \
@@ -46,7 +46,7 @@ RUN git checkout 1.0.0 -f && apt-get update && apt install -y cmake cmake-gui \
     pyside2-tools python3-dev python3-matplotlib python3-packaging \
     python3-pivy python3-ply python3-pyside2.qtcore python3-pyside2.qtgui \
     python3-pyside2.qtsvg python3-pyside2.qtwidgets python3-pyside2.qtnetwork \
-    python3-pyside2.qtwebengine python3-pyside2.qtwebenginecore \ 
+    python3-pyside2.qtwebengine python3-pyside2.qtwebenginecore \
     python3-pyside2.qtwebenginewidgets python3-pyside2.qtwebchannel python3-markdown \
     python3-git qtbase5-dev qttools5-dev swig libyaml-cpp-dev \
     && mkdir build
@@ -59,4 +59,4 @@ WORKDIR /app/converter
 
 COPY . /app/converter/
 
-ENTRYPOINT ["xvfb-run","-a","/venv/bin/python3.11","test.py"]
+ENTRYPOINT ["xvfb-run", "-a", "/app/converter/venv/bin/python3.11", "test.py"]

@@ -1,0 +1,7 @@
+.git
+sample_models
+test_outputs
+__pycache__
+*.py[cod]
+*.glb
+*.log
