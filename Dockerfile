@@ -12,11 +12,13 @@ WORKDIR /app/blender-git
 RUN git clone https://projects.blender.org/blender/blender.git
 
 WORKDIR blender
-#TODO: try to install a specific version e.g. run git checkout 4.3.2
+RUN git checkout v4.5.3
+ARG BUILD_JOBS=2
 RUN apt update && apt install -y build-essential git git-lfs subversion cmake libx11-dev libxxf86vm-dev libxcursor-dev libxi-dev libxrandr-dev libxinerama-dev libegl-dev \
     && apt install -y libwayland-dev wayland-protocols libxkbcommon-dev libdbus-1-dev linux-libc-dev
 
-RUN make update && make -j$(nproc) bpy
+RUN make update
+RUN make -j${BUILD_JOBS} bpy
 
 RUN apt-get install python3-setuptools
 
@@ -53,7 +55,7 @@ RUN git checkout 1.0.0 -f && apt-get update && apt install -y cmake cmake-gui \
 
 WORKDIR build
 
-RUN cmake ../ -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local && make -j$(nproc) && make install
+RUN cmake ../ -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local && make -j${BUILD_JOBS} && make install
 
 WORKDIR /app/converter
 
