@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+         <loc>https://ismayilovh.github.io/ARDesign-Converter/</loc>
+         <lastmod>2026-10-18</lastmod>
+    </url>
+    <url>
+         <loc>https://ismayilovh.github.io/ARDesign-Converter/architecture/</loc>
+         <lastmod>2026-10-18</lastmod>
+    </url>
+    <url>
+         <loc>https://ismayilovh.github.io/ARDesign-Converter/deployment/</loc>
+         <lastmod>2026-10-18</lastmod>
+    </url>
+    <url>
+         <loc>https://ismayilovh.github.io/ARDesign-Converter/maintenance/</loc>
+         <lastmod>2026-10-18</lastmod>
+    </url>
+    <url>
+         <loc>https://ismayilovh.github.io/ARDesign-Converter/overview/</loc>
+         <lastmod>2026-10-18</lastmod>
+    </url>
+    <url>
+         <loc>https://ismayilovh.github.io/ARDesign-Converter/api/blender/</loc>
+         <lastmod>2026-10-18</lastmod>
+    </url>
+    <url>
+         <loc>https://ismayilovh.github.io/ARDesign-Converter/api/freecad/</loc>
+         <lastmod>2026-10-18</lastmod>
+    </url>
+    <url>
+         <loc>https://ismayilovh.github.io/ARDesign-Converter/api/pipeline/</loc>
+         <lastmod>2026-10-18</lastmod>
+    </url>
+</urlset>
