@@ -16,8 +16,8 @@ def main(args):
         print(f"Unsupported scale '{args[1]}'; expected mm, cm, in, or m.", file=sys.stderr)
         return 2
 
-    # ARPatent invokes the converter from /app/converter and reads this file
-    # from that working directory. Keep OUTPUT_PATH available for older callers.
+    # ARDesign Server invokes the converter from /app/converter and collects
+    # OUTPUT_PATH from the job's output directory.
     legacy_output_path = os.path.abspath("out.glb")
     output_path = os.path.abspath(os.environ.get("OUTPUT_PATH", "output.glb"))
     os.environ["OUTPUT_PATH"] = output_path
@@ -28,7 +28,7 @@ def main(args):
         if not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
             raise RuntimeError(f"Conversion did not produce a non-empty GLB at {output_path}")
         # Keep the original one-argument CLI's out.glb artifact for existing
-        # callers while providing output.glb for the ARPatent worker contract.
+        # callers while providing output.glb for the ARDesign Server contract.
         if "OUTPUT_PATH" not in os.environ and output_path != legacy_output_path:
             shutil.copyfile(output_path, legacy_output_path)
     except Exception as exc:

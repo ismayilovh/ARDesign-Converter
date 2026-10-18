@@ -1,0 +1,54 @@
+site_name: ARDesign Converter
+site_description: Documentation for the ARDesign 3D model conversion service.
+site_url: https://ismayilovh.github.io/ARDesign-Converter/
+repo_url: https://github.com/ismayilovh/ARDesign-Converter
+repo_name: ismayilovh/ARDesign-Converter
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: deep purple
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            separate_signature: true
+            docstring_section_style: table
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - tables
+
+nav:
+  - Home: index.md
+  - Overview: overview.md
+  - Architecture: architecture.md
+  - Deployment: deployment.md
+  - Maintenance: maintenance.md
+  - API Reference:
+      - Entry point and dispatcher: api/pipeline.md
+      - Blender conversions: api/blender.md
+      - FreeCAD bridge: api/freecad.md
+
+strict: true
