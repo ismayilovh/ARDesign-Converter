@@ -35,7 +35,10 @@ RUN git clone --recurse-submodules https://github.com/FreeCAD/FreeCAD.git
 
 WORKDIR FreeCAD
 
-RUN git checkout 1.0.0 -f && apt-get update && apt install -y cmake cmake-gui \
+RUN git checkout 1.0.0 -f \
+    && git submodule update --init --recursive \
+    && apt-get update \
+    && apt install -y cmake cmake-gui \
     libboost-date-time-dev libboost-dev libboost-filesystem-dev \
     libboost-graph-dev libboost-iostreams-dev libboost-program-options-dev \
     libboost-python-dev libboost-regex-dev libboost-serialization-dev \
