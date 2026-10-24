@@ -42,7 +42,23 @@ def empty_blender_scene():
 
 def apply_draco_compression(output_path, scale_factor=1.0):
     empty_blender_scene()
-    bpy.ops.import_scene.gltf(filepath=output_path)
+    try:
+        bpy.ops.import_scene.gltf(filepath=output_path)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Blender could not import FreeCAD's intermediate GLB '{output_path}': {exc}"
+        ) from exc
+
+    meshes = [
+        obj for obj in bpy.context.scene.objects
+        if obj.type == "MESH" and obj.data is not None and len(obj.data.polygons) > 0
+    ]
+    if not meshes:
+        raise RuntimeError(
+            f"FreeCAD's intermediate GLB '{output_path}' contains no mesh geometry; "
+            "the CAD import/export produced an empty scene"
+        )
+
     _scale_imported_model(scale_factor)
     _export_glb(output_path)
 
