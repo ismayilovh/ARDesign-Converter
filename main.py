@@ -39,4 +39,26 @@ def main(args):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        exit_code = main(sys.argv[1:])
+    except SystemExit as exc:
+        # The dispatcher can call sys.exit() on conversion errors.
+        exit_code = exc.code if isinstance(exc.code, int) else 1
+
+    cad_extensions = {".iges", ".igs", ".stp", ".step"}
+    is_cad_input = (
+        len(sys.argv) > 1
+        and os.path.splitext(sys.argv[1])[1].lower() in cad_extensions
+    )
+    if is_cad_input:
+        # FreeCAD/Qt native teardown can hang after the GLB has been written.
+        # This process handles one model and runs in a disposable container, so
+        # flush diagnostics and let the OS release native resources on exit.
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+        os._exit(exit_code)
+
+    sys.exit(exit_code)
