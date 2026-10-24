@@ -3,6 +3,7 @@ import os
 import FreeCAD
 import FreeCADGui  # noqa: F401 - required by ImportGui in the GUI process
 import ImportGui  # type: ignore
+import Part
 
 
 def _shape_objects(document_objects):
@@ -55,6 +56,18 @@ def convert_step_iges():
 
         document_objects = list(doc.Objects)
         export_objects = _shape_objects(document_objects)
+        if not export_objects and os.path.splitext(model_path)[1].lower() in {".igs", ".iges"}:
+            # The OCAF IGES reader can return successfully without creating
+            # document shapes. Retry with FreeCAD's legacy Part IGES importer.
+            print(
+                "ImportGui produced no IGES shapes; retrying with Part.insert",
+                flush=True,
+            )
+            Part.insert(model_path, doc.Name)
+            doc.recompute()
+            document_objects = list(doc.Objects)
+            export_objects = _shape_objects(document_objects)
+
         if not export_objects:
             descriptions = _describe_objects(document_objects)
             object_summary = "; ".join(descriptions[:30]) if descriptions else "no document objects"
