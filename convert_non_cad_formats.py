@@ -22,7 +22,74 @@ def _scale_imported_model(scale_factor):
             obj.scale = tuple(component * scale_factor for component in obj.scale)
 
 
+def _linked_image_nodes(socket):
+    """Yield image texture nodes connected upstream of a shader socket."""
+    seen = set()
+
+    def visit(current_socket):
+        for link in current_socket.links:
+            node = link.from_node
+            pointer = node.as_pointer()
+            if pointer in seen:
+                continue
+            seen.add(pointer)
+            if node.type == "TEX_IMAGE":
+                yield node
+                continue
+            for input_socket in node.inputs:
+                if input_socket.is_linked:
+                    yield from visit(input_socket)
+
+    yield from visit(socket)
+
+
+def _normalize_glb_texture_samplers():
+    """Align samplers for channels glTF must store in one texture.
+
+    glTF has one sampler for the combined base-color/alpha texture and one
+    sampler for the combined metallic/roughness texture. Blender's exporter
+    chooses the first image node's sampler when these channels use different
+    image nodes. Use the primary channel's sampler consistently so the result
+    does not depend on node traversal order.
+    """
+    sampler_properties = ("interpolation", "extension", "projection", "projection_blend")
+    channel_groups = (("Base Color", "Alpha"), ("Metallic", "Roughness"))
+
+    for material in bpy.data.materials:
+        if not material.use_nodes or material.node_tree is None:
+            continue
+        for shader in material.node_tree.nodes:
+            if shader.type != "BSDF_PRINCIPLED":
+                continue
+            for primary_name, companion_name in channel_groups:
+                primary_socket = shader.inputs.get(primary_name)
+                companion_socket = shader.inputs.get(companion_name)
+                if primary_socket is None or companion_socket is None:
+                    continue
+                primary_nodes = list(_linked_image_nodes(primary_socket))
+                if not primary_nodes:
+                    continue
+                reference = primary_nodes[0]
+                for image_node in _linked_image_nodes(companion_socket):
+                    if image_node == reference:
+                        continue
+                    changed = []
+                    for prop in sampler_properties:
+                        if hasattr(reference, prop) and hasattr(image_node, prop):
+                            value = getattr(reference, prop)
+                            if getattr(image_node, prop) != value:
+                                setattr(image_node, prop, value)
+                                changed.append(prop)
+                    if changed:
+                        print(
+                            f"Normalized {material.name} {companion_name} texture sampler "
+                            f"to match {primary_name} ({', '.join(changed)}).",
+                            flush=True,
+                        )
+
+
 def _export_glb(output_path):
+    _normalize_glb_texture_samplers()
     bpy.ops.export_scene.gltf(
         filepath=output_path,
         export_format='GLB',
