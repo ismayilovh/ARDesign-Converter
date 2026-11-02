@@ -50,6 +50,7 @@ def _patch_gltf_basecolor_alpha_srgb_composition():
     from io_scene_gltf2.blender.exp.material.encode_image import ExportImage
 
     if getattr(ExportImage, "_ardesign_srgb_composition_patched", False):
+        print("ARDesign sRGB texture-packing hook is active.", flush=True)
         return
 
     original_gather_image = gltf_image.gather_image
@@ -59,7 +60,11 @@ def _patch_gltf_basecolor_alpha_srgb_composition():
         result = original_gather_image(sockets, use_tile, export_settings)
         try:
             export_image = result[1]
-            socket_names = {socket.socket.name for socket in sockets}
+            socket_names = {
+                str(value).strip().replace("_", " ").casefold()
+                for socket in sockets
+                for value in (socket.socket.name, socket.socket.identifier)
+            }
             fills = export_image.fills
             color_images = {}
             alpha_images = {}
@@ -75,20 +80,29 @@ def _patch_gltf_basecolor_alpha_srgb_composition():
                     alpha_images[pointer] = image
 
             separate_color_and_alpha = (
-                "Base Color" in socket_names
-                and "Alpha" in socket_names
-                and color_images
-                and alpha_images
+                "base color" in socket_names
+                and "alpha" in socket_names
+                and bool(color_images)
+                and bool(alpha_images)
                 and color_images.keys().isdisjoint(alpha_images.keys())
             )
-            source_is_srgb = color_images and all(
-                image.colorspace_settings.name.casefold() == "srgb"
-                for image in color_images.values()
-            )
-            if separate_color_and_alpha and source_is_srgb:
+            if separate_color_and_alpha:
                 export_image._ardesign_srgb_rgb_linearized = True
-        except (AttributeError, IndexError, TypeError, ValueError):
-            pass
+                color_spaces = sorted({image.colorspace_settings.name for image in color_images.values()})
+                print(
+                    "Detected separate Base Color/Alpha images; will encode packed RGB as sRGB "
+                    f"(source color spaces: {color_spaces}).",
+                    flush=True,
+                )
+            elif "base color" in socket_names and "alpha" in socket_names:
+                print(
+                    "sRGB texture-packing hook saw Base Color and Alpha, but did not find "
+                    f"separate channel images (RGB images: {len(color_images)}, "
+                    f"alpha images: {len(alpha_images)}).",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(f"sRGB texture-packing inspection failed: {exc}", flush=True)
         return result
 
     def encode_numpy_with_srgb_rgb(self, pixels, dimensions, export_settings):
@@ -111,6 +125,7 @@ def _patch_gltf_basecolor_alpha_srgb_composition():
     gltf_image.gather_image = gather_image_with_srgb_metadata
     ExportImage._ExportImage__encode_from_numpy_array = encode_numpy_with_srgb_rgb
     ExportImage._ardesign_srgb_composition_patched = True
+    print("Installed ARDesign sRGB texture-packing hook.", flush=True)
 
 def _normalize_glb_texture_samplers():
     """Align samplers for channels glTF must store in one texture.
