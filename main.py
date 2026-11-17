@@ -2,6 +2,12 @@
 import os
 import shutil
 import sys
+
+# Ensure converter directory is on sys.path regardless of execution CWD
+_converter_dir = os.path.dirname(os.path.abspath(__file__))
+if _converter_dir not in sys.path:
+    sys.path.insert(0, _converter_dir)
+
 from utils import convert_file_to_glb
 
 
@@ -39,8 +45,11 @@ def main(args):
 
 
 if __name__ == "__main__":
+    cli_args = sys.argv[1:]
+    if "--" in cli_args:
+        cli_args = cli_args[cli_args.index("--") + 1:]
     try:
-        exit_code = main(sys.argv[1:])
+        exit_code = main(cli_args)
     except SystemExit as exc:
         # The dispatcher can call sys.exit() on conversion errors.
         exit_code = exc.code if isinstance(exc.code, int) else 1

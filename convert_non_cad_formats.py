@@ -1,9 +1,15 @@
 import bpy
 import os
+import re
+import shutil
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
 
 DRACO_COMPRESS_LEVEL = 6
 DRACO_QUANTIZATION_SETTINGS = (16, 12, 20, 12)
 UNIT_TO_METERS = {"mm": 0.001, "cm": 0.01, "in": 0.0254, "m": 1.0}
+ILLUM_ZERO = re.compile(r"(?mi)^(\s*illum\s+)0(?=\s*(?:#.*)?$)")
 
 
 def unit_to_meters(unit):
@@ -20,6 +26,144 @@ def _scale_imported_model(scale_factor):
     for obj in bpy.context.scene.objects:
         if obj.parent is None:
             obj.scale = tuple(component * scale_factor for component in obj.scale)
+
+
+def _link_or_copy(source, destination):
+    """Populate an isolated import tree without mutating the uploaded files."""
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+
+
+@contextmanager
+def _obj_import_path_with_supported_illum(file_path):
+    """Yield an OBJ path with unsupported ``illum 0`` values normalised.
+
+    Blender's OBJ importer emits a warning for ``illum 0`` although its
+    resulting Principled material is the same non-reflective approximation it
+    uses for ``illum 1``. Attempt in-place temporary normalisation if the MTL
+    files are writable (restoring them on exit). If read-only, stage a minimal
+    isolated copy with the modified MTL declarations without recursively
+    walking parent directories (e.g. /tmp).
+    """
+    source_obj = Path(file_path).resolve()
+    source_root = source_obj.parent
+
+    # Find MTL files referenced by the OBJ or beside it in the same directory
+    mtl_files = []
+    mtllib_re = re.compile(r"^\s*mtllib\s+(.+)$", re.IGNORECASE)
+    try:
+        with open(source_obj, "r", encoding="utf-8", errors="surrogateescape") as stream:
+            for line in stream:
+                match = mtllib_re.match(line)
+                if match:
+                    candidate = source_root / match.group(1).strip()
+                    if candidate.is_file() and candidate not in mtl_files:
+                        mtl_files.append(candidate)
+    except OSError:
+        pass
+
+    if not mtl_files:
+        try:
+            mtl_files = [p for p in source_root.iterdir()
+                         if p.is_file() and p.suffix.lower() == ".mtl"]
+        except OSError:
+            pass
+
+    replacements = {}
+    replacement_count = 0
+    for mtl_path in mtl_files:
+        try:
+            contents = mtl_path.read_text(encoding="utf-8", errors="surrogateescape")
+        except OSError:
+            continue
+        sanitized, count = ILLUM_ZERO.subn(r"\g<1>1", contents)
+        if count:
+            replacements[mtl_path] = (contents, sanitized)
+            replacement_count += count
+
+    if not replacements:
+        yield str(source_obj)
+        return
+
+    # Strategy 1: Attempt in-place temporary modification with restoration in finally
+    can_modify_in_place = True
+    for mtl_path, (original, sanitized) in replacements.items():
+        try:
+            mtl_path.write_text(sanitized, encoding="utf-8", errors="surrogateescape")
+        except OSError:
+            can_modify_in_place = False
+            # Revert any already written
+            for p, (orig, _) in replacements.items():
+                if p == mtl_path:
+                    break
+                try:
+                    p.write_text(orig, encoding="utf-8", errors="surrogateescape")
+                except OSError:
+                    pass
+            break
+
+    if can_modify_in_place:
+        print(
+            f"ARDesign: normalized {replacement_count} unsupported OBJ illum 0 "
+            "declaration(s) to illum 1 in-place.",
+            flush=True,
+        )
+        try:
+            yield str(source_obj)
+        finally:
+            for mtl_path, (original, _) in replacements.items():
+                try:
+                    mtl_path.write_text(original, encoding="utf-8", errors="surrogateescape")
+                except OSError:
+                    pass
+        return
+
+    # Strategy 2: If read-only, stage a minimal bundle in a temp folder
+    try:
+        temporary = tempfile.mkdtemp(prefix="ardesign-obj-")
+    except OSError as exc:
+        print(
+            "ARDesign: could not create an isolated OBJ staging area for illum 0 "
+            f"normalization ({exc}); importing the original file.",
+            flush=True,
+        )
+        yield str(source_obj)
+        return
+
+    try:
+        staged_root = Path(temporary) / "bundle"
+        staged_root.mkdir(parents=True, exist_ok=True)
+        try:
+            # Stage only direct files in source_root (avoid traversing nested folders in /tmp)
+            for path in source_root.iterdir():
+                if path.is_file():
+                    staged_path = staged_root / path.name
+                    if path in replacements:
+                        staged_path.write_text(
+                            replacements[path][1], encoding="utf-8", errors="surrogateescape"
+                        )
+                    else:
+                        _link_or_copy(path, staged_path)
+        except OSError as exc:
+            print(
+                "ARDesign: could not stage OBJ materials for illum 0 normalization "
+                f"({exc}); importing the original file.",
+                flush=True,
+            )
+            yield str(source_obj)
+            return
+
+        print(
+            "ARDesign: normalized "
+            f"{replacement_count} unsupported OBJ illum 0 declaration(s) to illum 1 "
+            "in an isolated import copy.",
+            flush=True,
+        )
+        yield str(staged_root / source_obj.name)
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
 
 
 def _linked_image_nodes(socket):
@@ -43,89 +187,215 @@ def _linked_image_nodes(socket):
     yield from visit(socket)
 
 
-def _patch_gltf_basecolor_alpha_srgb_composition():
-    """Preserve sRGB RGB values when Blender packs separate color and alpha maps."""
-    import numpy as np
-    from io_scene_gltf2.blender.exp.material import image as gltf_image
-    from io_scene_gltf2.blender.exp.material.encode_image import ExportImage
+SAMPLER_PROPERTIES = ("interpolation", "extension", "projection", "projection_blend")
 
-    if getattr(ExportImage, "_ardesign_srgb_composition_patched", False):
-        print("ARDesign sRGB texture-packing hook is active.", flush=True)
+
+def _socket_default_signature(socket):
+    """Return a stable representation of an unlinked texture-vector input."""
+    value = socket.default_value
+    try:
+        return tuple(round(float(component), 9) for component in value)
+    except TypeError:
+        return round(float(value), 9)
+
+
+def _texture_vector_socket_signature(vector, seen=None):
+    """Describe the portion of a vector-node graph relevant to glTF mapping."""
+    if vector is None:
+        return None
+    if not vector.is_linked:
+        return ("constant", _socket_default_signature(vector))
+
+    seen = set() if seen is None else seen
+    link = vector.links[0]
+    node = link.from_node
+    pointer = node.as_pointer()
+    if pointer in seen:
+        return ("cycle", node.type)
+    seen.add(pointer)
+
+    if node.type == "TEX_COORD":
+        return ("texcoord", link.from_socket.name)
+    if node.type == "UVMAP":
+        return ("uvmap", node.uv_map)
+    if node.type == "MAPPING":
+        input_socket = node.inputs.get("Vector")
+        upstream = (
+            _texture_vector_socket_signature(input_socket, seen)
+            if input_socket is not None else None
+        )
+        return (
+            "mapping",
+            node.vector_type,
+            _socket_default_signature(node.inputs["Location"]),
+            _socket_default_signature(node.inputs["Rotation"]),
+            _socket_default_signature(node.inputs["Scale"]),
+            upstream,
+        )
+    if node.type == "REROUTE":
+        return _texture_vector_socket_signature(node.inputs[0], seen)
+
+    # A pointer is intentionally used only for graph types we cannot prove
+    # equivalent.  That keeps the exporter warning for procedural mappings
+    # which would need baking to be represented faithfully in glTF.
+    return ("unsupported", node.type, pointer, link.from_socket.identifier)
+
+
+def _image_vector_signature(image_node):
+    return _texture_vector_socket_signature(image_node.inputs.get("Vector"))
+
+
+def _image_texture_sampling_signature(image_node):
+    """Return the sampler and texture-coordinate state glTF must share."""
+    return (
+        *(getattr(image_node, prop, None) for prop in SAMPLER_PROPERTIES),
+        _image_vector_signature(image_node),
+    )
+
+
+def _patch_gltf_texture_exporter():
+    """Correct Blender's packing of separate Base Color and alpha images.
+
+    Blender's glTF exporter obtains pixel values from a colour image in linear
+    space.  Its ``__encode_unhappy`` path is used when it has to combine that
+    image with a separate alpha image, then writes those linear values directly
+    to the generated PNG.  glTF Base Color RGB is sRGB, so this makes colours
+    visibly too dark (the Dutch ship sails are a representative example).
+
+    The previous hook ran after ``gather_image`` returned.  That is too late:
+    gathering encodes the PNG before returning.  Patch the encode method and
+    the exact packing branch instead, and only for an sRGB RGB image combined
+    with a different alpha image.  Data textures (normal, metallic and
+    roughness) are left untouched.
+    """
+    import numpy as np
+    from io_scene_gltf2.blender.exp.material.encode_image import (
+        Channel,
+        ExportImage,
+        FillImage,
+        FillImageRGB2BW,
+        FillWith,
+        FillWhite,
+        TmpImageGuard,
+        make_temp_image_copy,
+    )
+
+    if getattr(ExportImage, "_ardesign_texture_exporter_patched", False):
+        print("ARDesign texture-export hook is active.", flush=True)
         return
 
-    original_gather_image = gltf_image.gather_image
+    original_encode = ExportImage.encode
+    original_encode_unhappy = ExportImage._ExportImage__encode_unhappy
     original_encode_numpy = ExportImage._ExportImage__encode_from_numpy_array
 
-    def gather_image_with_srgb_metadata(sockets, use_tile, export_settings):
-        result = original_gather_image(sockets, use_tile, export_settings)
-        try:
-            export_image = result[1]
-            socket_names = {
-                str(value).strip().replace("_", " ").casefold()
-                for socket in sockets
-                for value in (socket.socket.name, socket.socket.identifier)
-            }
-            fills = export_image.fills
-            color_images = {}
-            alpha_images = {}
-            for channel, fill in fills.items():
-                image = getattr(fill, "image", None)
-                if image is None:
-                    continue
-                channel_index = int(channel)
-                pointer = image.as_pointer()
-                if channel_index in (0, 1, 2):
-                    color_images[pointer] = image
-                elif channel_index == 3:
-                    alpha_images[pointer] = image
+    def needs_srgb_basecolor_packing(export_image):
+        """Return true only for RGB-from-colour + alpha-from-other-image."""
+        fills = export_image.fills
+        rgb_fills = [fills.get(Channel.R), fills.get(Channel.G), fills.get(Channel.B)]
+        alpha_fill = fills.get(Channel.A)
 
-            separate_color_and_alpha = (
-                "base color" in socket_names
-                and "alpha" in socket_names
-                and bool(color_images)
-                and bool(alpha_images)
-                and color_images.keys().isdisjoint(alpha_images.keys())
+        if not all(isinstance(fill, FillImage) for fill in rgb_fills):
+            return False
+
+        # Verify all three color channels originate from the same image and 0, 1, 2
+        rgb_images = {fill.image for fill in rgb_fills}
+        if len(rgb_images) != 1:
+            return False
+
+        if [int(fill.src_chan) for fill in rgb_fills] != [0, 1, 2]:
+            return False
+
+        rgb_image = next(iter(rgb_images))
+        if isinstance(alpha_fill, (FillImage, FillImageRGB2BW)) and alpha_fill.image == rgb_image:
+            return False
+
+        if alpha_fill is not None and not isinstance(alpha_fill, (FillImage, FillImageRGB2BW, FillWith, FillWhite)):
+            return False
+
+        color_space = getattr(rgb_image.colorspace_settings, "name", "").casefold()
+        if color_space in ("non-color", "raw"):
+            return False
+
+        return True
+
+    def encode_with_srgb_detection(self, mime_type, export_settings):
+        self._ardesign_srgb_basecolor_packing = needs_srgb_basecolor_packing(self)
+        if self._ardesign_srgb_basecolor_packing:
+            rgb_image = self.fills[Channel.R].image
+            alpha_image = getattr(self.fills[Channel.A], "image", None)
+            print(
+                "ARDesign: packing an sRGB Base Color image with a separate "
+                f"alpha value ({rgb_image.name} + "
+                f"{getattr(alpha_image, 'name', type(self.fills.get(Channel.A)).__name__)}).",
+                flush=True,
             )
-            if separate_color_and_alpha:
-                export_image._ardesign_srgb_rgb_linearized = True
-                color_spaces = sorted({image.colorspace_settings.name for image in color_images.values()})
-                print(
-                    "Detected separate Base Color/Alpha images; will encode packed RGB as sRGB "
-                    f"(source color spaces: {color_spaces}).",
-                    flush=True,
-                )
-            elif "base color" in socket_names and "alpha" in socket_names:
-                print(
-                    "sRGB texture-packing hook saw Base Color and Alpha, but did not find "
-                    f"separate channel images (RGB images: {len(color_images)}, "
-                    f"alpha images: {len(alpha_images)}).",
-                    flush=True,
-                )
-        except Exception as exc:
-            print(f"sRGB texture-packing inspection failed: {exc}", flush=True)
-        return result
+        return original_encode(self, mime_type, export_settings)
 
-    def encode_numpy_with_srgb_rgb(self, pixels, dimensions, export_settings):
-        if not getattr(self, "_ardesign_srgb_rgb_linearized", False):
-            return original_encode_numpy(self, pixels, dimensions, export_settings)
+    def encode_unhappy_with_srgb_rgb(self, export_settings):
+        if not getattr(self, "_ardesign_srgb_basecolor_packing", False):
+            return original_encode_unhappy(self, export_settings)
 
-        packed = np.asarray(pixels, dtype=np.float32).reshape((-1, 4)).copy()
-        linear_rgb = np.clip(packed[:, :3], 0.0, 1.0)
-        packed[:, :3] = np.where(
+        # This follows Blender 4.5.3's __encode_unhappy implementation.  The
+        # single deliberate difference is converting the composed RGB values
+        # from Blender's linear floats to sRGB before the generated PNG is
+        # saved.  Alpha remains linear as glTF requires.
+        images = []
+        for fill in self.fills.values():
+            if isinstance(fill, (FillImage, FillImageRGB2BW)) and fill.image not in images:
+                images.append(fill.image)
+                export_settings["exported_images"][fill.image.name] = 2
+
+        if not images:
+            return original_encode_unhappy(self, export_settings)
+
+        width = max(image.size[0] for image in images)
+        height = max(image.size[1] for image in images)
+        out_buf = np.ones(width * height * 4, np.float32)
+        tmp_buf = np.empty(width * height * 4, np.float32)
+
+        for image in images:
+            if image.size[0] == width and image.size[1] == height:
+                image.pixels.foreach_get(tmp_buf)
+            else:
+                with TmpImageGuard() as guard:
+                    make_temp_image_copy(guard, src_image=image)
+                    tmp_image = guard.image
+                    tmp_image.scale(width, height)
+                    tmp_image.pixels.foreach_get(tmp_buf)
+
+            for dst_chan, fill in self.fills.items():
+                if isinstance(fill, FillImage) and fill.image == image:
+                    out_buf[int(dst_chan)::4] = tmp_buf[int(fill.src_chan)::4]
+                elif isinstance(fill, FillImageRGB2BW) and fill.image == image:
+                    out_buf[int(dst_chan)::4] = (
+                        tmp_buf[0::4] * 0.2989
+                        + tmp_buf[1::4] * 0.5870
+                        + tmp_buf[2::4] * 0.1140
+                    )
+                    if image.alpha_mode in {"STRAIGHT", "PREMUL"}:
+                        out_buf[int(dst_chan)::4] *= tmp_buf[3::4]
+
+        # Apply constant fills (FillWith, FillWhite)
+        for dst_chan, fill in self.fills.items():
+            if isinstance(fill, (FillWith, FillWhite)):
+                out_buf[int(dst_chan)::4] = getattr(fill, "value", 1.0)
+
+        linear_rgb = np.clip(out_buf.reshape((-1, 4))[:, :3], 0.0, 1.0)
+        out_buf.reshape((-1, 4))[:, :3] = np.where(
             linear_rgb <= 0.0031308,
             linear_rgb * 12.92,
             1.055 * np.power(linear_rgb, 1.0 / 2.4) - 0.055,
         )
         print(
-            "Re-encoded packed Base Color RGB as sRGB; alpha channel preserved.",
+            "ARDesign: wrote packed Base Color RGB as sRGB; alpha channel preserved.",
             flush=True,
         )
-        return original_encode_numpy(self, packed.reshape(-1), dimensions, export_settings)
+        return original_encode_numpy(self, out_buf, (width, height), export_settings)
 
-    gltf_image.gather_image = gather_image_with_srgb_metadata
-    ExportImage._ExportImage__encode_from_numpy_array = encode_numpy_with_srgb_rgb
-    ExportImage._ardesign_srgb_composition_patched = True
-    print("Installed ARDesign sRGB texture-packing hook.", flush=True)
+    ExportImage.encode = encode_with_srgb_detection
+    ExportImage._ExportImage__encode_unhappy = encode_unhappy_with_srgb_rgb
+    ExportImage._ardesign_texture_exporter_patched = True
+    print("Installed ARDesign Base Color/alpha texture-packing fix.", flush=True)
 
 def _normalize_glb_texture_samplers():
     """Align samplers for channels glTF must store in one texture.
@@ -136,8 +406,11 @@ def _normalize_glb_texture_samplers():
     image nodes. Use the primary channel's sampler consistently so the result
     does not depend on node traversal order.
     """
-    sampler_properties = ("interpolation", "extension", "projection", "projection_blend")
-    channel_groups = (("Base Color", "Alpha"), ("Metallic", "Roughness"))
+    channel_groups = (
+        ("Base Color", "Alpha"),
+        ("Metallic", "Roughness"),
+        ("Roughness", "Metallic"),
+    )
 
     for material in bpy.data.materials:
         if not material.use_nodes or material.node_tree is None:
@@ -157,8 +430,16 @@ def _normalize_glb_texture_samplers():
                 for image_node in _linked_image_nodes(companion_socket):
                     if image_node == reference:
                         continue
+                    if _image_vector_signature(image_node) != _image_vector_signature(reference):
+                        print(
+                            f"ARDesign: {material.name} uses different texture-coordinate "
+                            f"mappings for {primary_name} and {companion_name}; preserving "
+                            "Blender's warning because faithful GLB output requires baking.",
+                            flush=True,
+                        )
+                        continue
                     changed = []
-                    for prop in sampler_properties:
+                    for prop in SAMPLER_PROPERTIES:
                         if hasattr(reference, prop) and hasattr(image_node, prop):
                             value = getattr(reference, prop)
                             if getattr(image_node, prop) != value:
@@ -172,9 +453,87 @@ def _normalize_glb_texture_samplers():
                         )
 
 
+def _patch_gltf_sampler_warning():
+    """Suppress Blender's multi-node sampler warning only when it is harmless.
+
+    Base Color and alpha commonly originate from two Image Texture nodes.  glTF
+    correctly has one sampler for the packed image, and the normalisation above
+    makes its filter/wrap settings identical.  Blender nevertheless emits its
+    generic warning solely because two nodes exist.  Keep the warning when the
+    UV source or sampler settings differ, because such a material cannot be
+    represented by one glTF texture without baking; suppress it only when the
+    two nodes are demonstrably equivalent.
+    """
+    from io_scene_gltf2.blender.exp.material import texture as gltf_texture
+    from io_scene_gltf2.blender.exp.material.search_node_tree import get_texture_node_from_socket
+
+    if getattr(gltf_texture, "_ardesign_sampler_warning_patched", False):
+        return
+
+    original_gather_sampler = gltf_texture.__dict__["__gather_sampler"]
+    warning_text = "More than one shader node tex image used for a texture."
+
+    def nodes_share_a_sampler(shader_nodes):
+        reference_signature = _image_texture_sampling_signature(
+            shader_nodes[0].shader_node
+        )
+        for result in shader_nodes[1:]:
+            candidate_signature = _image_texture_sampling_signature(result.shader_node)
+            if candidate_signature != reference_signature:
+                return False
+        return True
+
+    def gather_sampler_without_false_warning(blender_shader_sockets, export_settings):
+        shader_nodes = [
+            get_texture_node_from_socket(socket, export_settings)
+            for socket in blender_shader_sockets
+        ]
+        shader_nodes = [node for node in shader_nodes if node is not None]
+        if len(shader_nodes) < 2 or not nodes_share_a_sampler(shader_nodes):
+            return original_gather_sampler(blender_shader_sockets, export_settings)
+
+        logger = export_settings.get("log")
+        original_warning = getattr(logger, "warning", None)
+        if original_warning is None:
+            return original_gather_sampler(blender_shader_sockets, export_settings)
+
+        suppressed = False
+
+        def warning_without_false_positive(message, *args, **kwargs):
+            nonlocal suppressed
+            if str(message).startswith(warning_text):
+                suppressed = True
+                return None
+            return original_warning(message, *args, **kwargs)
+
+        try:
+            logger.warning = warning_without_false_positive
+        except (AttributeError, TypeError):
+            return original_gather_sampler(blender_shader_sockets, export_settings)
+        try:
+            result = original_gather_sampler(blender_shader_sockets, export_settings)
+        finally:
+            try:
+                logger.warning = original_warning
+            except (AttributeError, TypeError):
+                pass
+
+        if suppressed:
+            print(
+                "ARDesign: combined texture nodes share one sampler and UV source; "
+                "suppressed Blender's redundant sampler warning.",
+                flush=True,
+            )
+        return result
+
+    gltf_texture.__dict__["__gather_sampler"] = gather_sampler_without_false_warning
+    gltf_texture._ardesign_sampler_warning_patched = True
+
+
 def _export_glb(output_path):
-    _patch_gltf_basecolor_alpha_srgb_composition()
+    _patch_gltf_texture_exporter()
     _normalize_glb_texture_samplers()
+    _patch_gltf_sampler_warning()
     bpy.ops.export_scene.gltf(
         filepath=output_path,
         export_format='GLB',
@@ -217,7 +576,8 @@ def apply_draco_compression(output_path, scale_factor=1.0):
 #converts .obj files to .glb.
 def convert_obj(file_path, output_path, scale_factor=1.0):
     empty_blender_scene()
-    bpy.ops.wm.obj_import(filepath=file_path)
+    with _obj_import_path_with_supported_illum(file_path) as import_path:
+        bpy.ops.wm.obj_import(filepath=import_path)
     _scale_imported_model(scale_factor)
     _export_glb(output_path)
 
